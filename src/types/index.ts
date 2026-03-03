@@ -1,7 +1,25 @@
+export interface TokenUsage {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+}
+
+export interface CostEstimate {
+  currency: string
+  tier: string
+  input_price_per_million: number
+  output_price_per_million: number
+  input_cost: number
+  output_cost: number
+  estimated_cost: number
+}
+
 export interface AnalysisResult {
   copywriting: string
   tags: string[]
   raw_response: string
+  usage?: TokenUsage | null
+  cost_estimate?: CostEstimate | null
 }
 
 export interface AnalyzeParams {

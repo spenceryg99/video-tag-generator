@@ -1,6 +1,6 @@
 [package]
 name = "video-tag-generator"
-version = "0.1.0"
+version = "2.0.0"
 description = "视频文案标签生成器"
 authors = ["you"]
 edition = "2021"

@@ -2,6 +2,93 @@ use super::types::*;
 
 const API_BASE: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
 
+#[derive(Clone, Copy)]
+struct PricingTier {
+    max_input_tokens: u64,
+    input_price_per_million: f64,
+    output_price_per_million: f64,
+    tier_name: &'static str,
+}
+
+// 价格单位：人民币 / 百万 tokens（参考 DashScope 模型价格页，按输入 tokens 所在阶梯估算）。
+const QWEN35_PLUS_TIERS: [PricingTier; 2] = [
+    PricingTier {
+        max_input_tokens: 256_000,
+        input_price_per_million: 2.936,
+        output_price_per_million: 17.614,
+        tier_name: "0~256K",
+    },
+    PricingTier {
+        max_input_tokens: 1_000_000,
+        input_price_per_million: 3.67,
+        output_price_per_million: 22.018,
+        tier_name: "256K~1M",
+    },
+];
+
+const QWEN35_FLASH_TIERS: [PricingTier; 3] = [
+    PricingTier {
+        max_input_tokens: 128_000,
+        input_price_per_million: 0.2,
+        output_price_per_million: 2.0,
+        tier_name: "0~128K",
+    },
+    PricingTier {
+        max_input_tokens: 256_000,
+        input_price_per_million: 0.8,
+        output_price_per_million: 8.0,
+        tier_name: "128K~256K",
+    },
+    PricingTier {
+        max_input_tokens: 1_000_000,
+        input_price_per_million: 1.2,
+        output_price_per_million: 12.0,
+        tier_name: "256K~1M",
+    },
+];
+
+const QWEN3_VL_PLUS_TIERS: [PricingTier; 3] = [
+    PricingTier {
+        max_input_tokens: 32_000,
+        input_price_per_million: 1.468,
+        output_price_per_million: 11.743,
+        tier_name: "0~32K",
+    },
+    PricingTier {
+        max_input_tokens: 128_000,
+        input_price_per_million: 2.202,
+        output_price_per_million: 17.614,
+        tier_name: "32K~128K",
+    },
+    PricingTier {
+        max_input_tokens: 256_000,
+        input_price_per_million: 4.404,
+        output_price_per_million: 35.228,
+        tier_name: "128K~256K",
+    },
+];
+
+const QWEN3_VL_FLASH_TIERS: [PricingTier; 3] = [
+    PricingTier {
+        max_input_tokens: 32_000,
+        input_price_per_million: 0.367,
+        output_price_per_million: 2.936,
+        tier_name: "0~32K",
+    },
+    PricingTier {
+        max_input_tokens: 128_000,
+        input_price_per_million: 0.55,
+        output_price_per_million: 4.404,
+        tier_name: "32K~128K",
+    },
+    PricingTier {
+        max_input_tokens: 256_000,
+        input_price_per_million: 0.881,
+        output_price_per_million: 7.046,
+        tier_name: "128K~256K",
+    },
+];
+
 pub async fn analyze_video_with_prompt(
     api_key: &str,
     model: &str,
@@ -50,21 +137,27 @@ pub async fn analyze_video_with_prompt(
         .await
         .map_err(|e| format!("解析API响应失败: {}", e))?;
 
-    if let Some(err) = chat_resp.error {
-        return Err(format!("API错误 [{}]: {}", err.code.unwrap_or_default(), err.message));
+    if let Some(err) = chat_resp.error.as_ref() {
+        return Err(format!(
+            "API错误 [{}]: {}",
+            err.code.clone().unwrap_or_default(),
+            err.message
+        ));
     }
 
     let raw_content = chat_resp
         .choices
-        .and_then(|c| c.into_iter().next())
-        .map(|c| c.message.content)
+        .as_ref()
+        .and_then(|c| c.first())
+        .map(|c| c.message.content.clone())
         .unwrap_or_default();
 
-    let result = parse_result(&raw_content);
+    let usage = normalize_usage(chat_resp.usage.as_ref());
+    let result = parse_result(&raw_content, usage, model);
     Ok(result)
 }
 
-fn parse_result(raw: &str) -> AnalysisResult {
+fn parse_result(raw: &str, usage: Option<TokenUsage>, model: &str) -> AnalysisResult {
     let mut copywriting = String::new();
     let mut tags: Vec<String> = Vec::new();
 
@@ -113,9 +206,86 @@ fn parse_result(raw: &str) -> AnalysisResult {
         copywriting = raw.to_string();
     }
 
+    let cost_estimate = usage
+        .as_ref()
+        .and_then(|u| estimate_cost(model, u.input_tokens, u.output_tokens));
+
     AnalysisResult {
         copywriting,
         tags,
         raw_response: raw.to_string(),
+        usage,
+        cost_estimate,
     }
+}
+
+fn normalize_usage(raw_usage: Option<&ChatUsage>) -> Option<TokenUsage> {
+    let usage = raw_usage?;
+    let input_tokens = usage.prompt_tokens.or(usage.input_tokens).unwrap_or(0);
+    let output_tokens = usage
+        .completion_tokens
+        .or(usage.output_tokens)
+        .unwrap_or(0);
+    let total_tokens = usage
+        .total_tokens
+        .unwrap_or(input_tokens.saturating_add(output_tokens));
+
+    if input_tokens == 0 && output_tokens == 0 && total_tokens == 0 {
+        return None;
+    }
+
+    Some(TokenUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    })
+}
+
+fn estimate_cost(model: &str, input_tokens: u64, output_tokens: u64) -> Option<CostEstimate> {
+    let tier = select_pricing_tier(model, input_tokens)?;
+    let input_cost = (input_tokens as f64 / 1_000_000.0) * tier.input_price_per_million;
+    let output_cost = (output_tokens as f64 / 1_000_000.0) * tier.output_price_per_million;
+    let estimated_cost = input_cost + output_cost;
+
+    Some(CostEstimate {
+        currency: "CNY".to_string(),
+        tier: tier.tier_name.to_string(),
+        input_price_per_million: tier.input_price_per_million,
+        output_price_per_million: tier.output_price_per_million,
+        input_cost: round6(input_cost),
+        output_cost: round6(output_cost),
+        estimated_cost: round6(estimated_cost),
+    })
+}
+
+fn select_pricing_tier(model: &str, input_tokens: u64) -> Option<PricingTier> {
+    let model_lower = model.to_ascii_lowercase();
+    let tiers: &[PricingTier] = if model_lower.contains("qwen3.5-plus")
+        || model_lower == "qwen-plus"
+        || model_lower.starts_with("qwen-plus-")
+    {
+        &QWEN35_PLUS_TIERS
+    } else if model_lower.contains("qwen3.5-flash")
+        || model_lower == "qwen-flash"
+        || model_lower.starts_with("qwen-flash-")
+    {
+        &QWEN35_FLASH_TIERS
+    } else if model_lower.contains("qwen3-vl-plus") {
+        &QWEN3_VL_PLUS_TIERS
+    } else if model_lower.contains("qwen3-vl-flash") {
+        &QWEN3_VL_FLASH_TIERS
+    } else {
+        return None;
+    };
+
+    for tier in tiers {
+        if input_tokens <= tier.max_input_tokens {
+            return Some(*tier);
+        }
+    }
+    tiers.last().copied()
+}
+
+fn round6(v: f64) -> f64 {
+    (v * 1_000_000.0).round() / 1_000_000.0
 }

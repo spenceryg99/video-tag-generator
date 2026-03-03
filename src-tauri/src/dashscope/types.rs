@@ -49,6 +49,7 @@ pub struct VideoUrlContent {
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
     pub choices: Option<Vec<ChatChoice>>,
+    pub usage: Option<ChatUsage>,
     pub error: Option<ApiError>,
 }
 
@@ -68,6 +69,15 @@ pub struct ApiError {
     pub code: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChatUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+}
+
 // ========== 应用层结果 ==========
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,4 +85,24 @@ pub struct AnalysisResult {
     pub copywriting: String,
     pub tags: Vec<String>,
     pub raw_response: String,
+    pub usage: Option<TokenUsage>,
+    pub cost_estimate: Option<CostEstimate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostEstimate {
+    pub currency: String,
+    pub tier: String,
+    pub input_price_per_million: f64,
+    pub output_price_per_million: f64,
+    pub input_cost: f64,
+    pub output_cost: f64,
+    pub estimated_cost: f64,
 }
